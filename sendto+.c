@@ -1,8 +1,12 @@
 /* cl.exe /MD /Os /DUNICODE /D_UNICODE sendto+.c Ole32.lib shell32.lib user32.lib Comdlg32.lib Shlwapi.lib
+tcc -DUNICODE -D_UNICODE -DMINGW_HAS_SECURE_API -DINITGUID -lshell32 -lole32 -lshlwapi -lComdlg32 sendto+.c
 https://msdn.microsoft.com/en-us/library/cc144093.aspx
 https://msdn.microsoft.com/en-us/library/windows/desktop/bb776914.aspx
 https://msdn.microsoft.com/en-us/library/windows/desktop/bb776885.aspx
 GetCurrentDirectory()
+64 bits
+Wow64EnableWow64FsRedirection() only for system32;
+Use a trick for lnk file!
 */
 
 #ifndef UNICODE
@@ -11,22 +15,27 @@ GetCurrentDirectory()
 #define T_MAX_PATH 32767
 #endif
 
-#include <tchar.h>
-
 #define STRICT
+
+#include <tchar.h>
+#include <stdio.h>
+#include <sys\stat.h>
+
 #include <windows.h>
-#ifndef RC_INVOKED
+
 #include <windowsx.h>
 #include <shlobj.h>
 #include <shlwapi.h>
-#include <strsafe.h>
 #include <commdlg.h>
-#endif
+
+// mingw
+DEFINE_GUID(IID_IDropTarget, 0x00000122, 0x0000, 0x0000, 0xc0,0x00, 0x00,0x00,0x00,0x00,0x00,0x46);
+DEFINE_GUID(IID_IDataObject, 0x0000010e, 0x0000, 0x0000, 0xc0,0x00, 0x00,0x00,0x00,0x00,0x00,0x46);
 
 #define IDM_SENDTOFIRST 0
 
 TCHAR   *FOLDER_SENDTO;
-UINT    idm_t = IDM_SENDTOFIRST;
+UINT    idm_g = IDM_SENDTOFIRST;
 TCHAR   **PSENTTO;                      /* store the shourtcuts full path */
 
 HINSTANCE       g_hinst;                /* My hinstance */
@@ -35,21 +44,15 @@ LPSHELLFOLDER   g_psfDesktop;           /* The desktop folder */
 
 UINT FORKING = 0;   /* compatible with UAC focus changes */
 
+/* For system32/SysWOW64, current thread */
+PROC m_Wow64EnableWow64FsRedirection;
+
 LPSHELLFOLDER PIDL2PSF(LPITEMIDLIST pidl)
 {
-    HRESULT hres;
-    LPSHELLFOLDER psf;
+    LPSHELLFOLDER psf = NULL;
 
     if (pidl) {
-		hres = g_psfDesktop->lpVtbl->BindToObject(g_psfDesktop,
-                    pidl, NULL, &IID_IShellFolder, (LPVOID *)&psf);
-        if (SUCCEEDED(hres)) {
-            /* Woo-hoo, we're done */
-        } else {
-            psf = NULL;
-        }
-    } else {
-        psf = NULL;
+		g_psfDesktop->lpVtbl->BindToObject(g_psfDesktop, pidl, NULL, &IID_IShellFolder, (LPVOID *)&psf);
     }
     return psf;
 }
@@ -62,11 +65,11 @@ LPITEMIDLIST PidlFromPath(HWND hwnd, LPCTSTR pszPath)
     HRESULT hres;
 	WCHAR *wszName;
 	//
-	wszName = calloc(T_MAX_PATH, sizeof(WCHAR));
+	wszName = calloc(T_MAX_PATH + 1, sizeof(WCHAR));
+
 #ifdef UNICODE
-	if (FAILED(StringCchCopy(wszName, T_MAX_PATH, pszPath))) {
-		return NULL;
-	}
+	if (wcslen(pszPath) >= T_MAX_PATH) { return NULL; }
+	wcscpy(wszName, pszPath);
 #else
     if (!MultiByteToWideChar(CP_ACP, 0, pszPath, -1, wszName, T_MAX_PATH)) {
         return NULL;
@@ -109,14 +112,13 @@ HRESULT GetUIObjectOfAbsPidl(HWND hwnd, LPITEMIDLIST pidl, REFIID riid, LPVOID *
     HRESULT hres;
     /* Just for safety's sake. */
     *ppvOut = NULL;
-	hres = SHBindToParent(pidl, &IID_IShellFolder, (LPVOID *)&psf, &pidlLast);
+    hres = SHBindToParent(pidl, &IID_IShellFolder, (LPVOID *)&psf, (LPCITEMIDLIST*)&pidlLast);
     if (FAILED(hres)) {
         return hres;
     }
 
     /* Now ask the parent for the the UI object of the child. */
-    hres = psf->lpVtbl->GetUIObjectOf(psf, hwnd, 1, &pidlLast,
-                                riid, NULL, ppvOut);
+    hres = psf->lpVtbl->GetUIObjectOf(psf, hwnd, 1, (LPCITEMIDLIST*)&pidlLast, riid, NULL, ppvOut);
 
     /*
      *  Regardless of whether or not the GetUIObjectOf succeeded,
@@ -183,6 +185,79 @@ LPTSTR pidl_to_name(LPSHELLFOLDER psf, LPITEMIDLIST pidl, SHGDNF uFlags) {
     return pszName;
 }
 
+static size_t read_file(FILE* fp, unsigned char** output) {
+    size_t smart_size, count;
+    size_t length = 0;
+    //make it faster
+    if (fp == stdin) {
+        smart_size = stdin->_bufsiz;
+    }
+    else { //unstable for stdin!
+        struct stat filestats;
+        int fd = fileno(fp);
+        fstat(fd, &filestats);
+        smart_size = filestats.st_size + 1; // +1 to get EOF, BIG file
+    }
+    //
+    *output = calloc(1, 1); //just in case
+    while (!feof(fp)) {
+        *output = realloc(*output, length + smart_size + 1);
+        count = fread(*output + length, 1, smart_size, fp);
+        memset(*output + length + count, 0, 1); // append 0
+        length += count;
+    }
+    *output = realloc(*output, length + 1);
+    //
+    return length;
+}
+
+/* ;p run 64 bits app in "program files" */
+int GetShortcutTargetPath(TCHAR *szShortcutFile, TCHAR *szTargetPath)
+{
+	int rc = 0;
+	FILE *fd;
+	unsigned char *buf;
+	size_t len;
+
+	// open shortcut file
+	fd = _tfopen(szShortcutFile, _T("rb"));
+	len = read_file(fd, &buf);
+	fclose(fd);
+
+    if (len < 0x4C) {
+        goto cleanup;
+    }
+
+	// check for LNK file header "4C 00 00 00"
+	if(*(DWORD*)(buf + 0x00) != 0x0000004C) {
+		// LNK file header invalid
+		goto cleanup;
+	}
+
+	// check for shell link GUID "{00021401-0000-0000-00C0-000000000046}"
+	if(*(DWORD*)(buf + 0x04) != 0x00021401
+	|| *(DWORD*)(buf + 0x08) != 0x00000000
+	|| *(DWORD*)(buf + 0x0C) != 0x000000C0
+	|| *(DWORD*)(buf + 0x10) != 0x46000000) {
+		// shell link GUID invalid
+		goto cleanup;
+	}
+
+	// check for presence of shell item ID list
+	if((*(BYTE*)(buf + 0x14) & 0x01) == 0) {
+		// shell item ID list is not present
+		goto cleanup;
+	}
+
+	// pidl of target
+	rc = SHGetPathFromIDList((LPCITEMIDLIST)(buf + 0x4E), szTargetPath);
+
+cleanup:
+    free(buf);
+
+	return rc;
+}
+
 void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
 {
     MENUITEMINFO mii;
@@ -200,47 +275,60 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
         if (SUCCEEDED(hres)) {
             while (peidl->lpVtbl->Next(peidl, 1, &pidl, NULL) == S_OK) {
                 LPTSTR pszPath, pszName;
+                LPTSTR pszPathTarget;   // redirect right
                 UINT len;
                 //
                 pszPath = pidl_to_name(psf, pidl, SHGDN_FORPARSING);
                 if (pszPath == NULL) {continue;}
+                /* ;p run 64 bits app in "program files" */
+                if (m_Wow64EnableWow64FsRedirection != NULL && _tcsicmp(PathFindExtension(pszPath), _T(".lnk")) == 0) {
+                    pszPathTarget = CoTaskMemAlloc(T_MAX_PATH + 1);
+                    if (GetShortcutTargetPath(pszPath, pszPathTarget) == 0) {
+                        CoTaskMemFree(pszPathTarget);
+                        pszPathTarget = pszPath;
+                    }
+                    //MessageBox(NULL, pszPath, NULL, MB_OK);
+                }
+                else {
+                    pszPathTarget = pszPath;
+                }
                 pszName = pidl_to_name(psf, pidl, SHGDN_NORMAL);
                 if (pszName == NULL) {continue;}
                 //
                 // store rather than retrial
-                PSENTTO = (TCHAR**)realloc(PSENTTO, sizeof(TCHAR*) * (idm_t + 1));
+                PSENTTO = (TCHAR**)realloc(PSENTTO, sizeof(TCHAR*) * (idm_g - IDM_SENDTOFIRST + 1));
                 if (PSENTTO == NULL) {continue;}
-                PSENTTO[idm_t] = StrDup(pszPath);
+                PSENTTO[idm_g] = StrDup(pszPathTarget);
                 //
                 if (PathIsDirectory(pszPath)) {
                     HMENU hSubMenu = CreatePopupMenu();
-                    if (AppendMenu(hmenu, MF_ENABLED | MF_POPUP | MF_STRING, (UINT)hSubMenu, pszName)) {
-                        idm_t++;
+                    if (AppendMenu(hmenu, MF_ENABLED | MF_STRING | MF_POPUP, (UINT)hSubMenu, pszName)) {
+                        idm_g++;
                         FolderToMenu(hwnd, hSubMenu, pszPath);
                     }
                 }
                 else {
-                    if (AppendMenu(hmenu, MF_ENABLED | MF_STRING, idm_t, pszName)) {
+                    if (AppendMenu(hmenu, MF_ENABLED | MF_STRING, idm_g, pszName)) {
                         mii.cbSize = sizeof(mii);
                         mii.fMask = MIIM_DATA;
                         mii.dwItemData = (ULONG_PTR)pidl;
-                        SetMenuItemInfo(hmenu, idm_t, FALSE, &mii);
-                        idm_t++;
+                        SetMenuItemInfo(hmenu, idm_g, FALSE, &mii);
+                        idm_g++;
                     }
                 }
                 //
                 CoTaskMemFree(pszPath);
+                CoTaskMemFree(pszPathTarget);
                 CoTaskMemFree(pszName);
             }
             peidl->lpVtbl->Release(peidl);
         }
         psf->lpVtbl->Release(psf);
-
     }
 
-    if (idm_t == IDM_SENDTOFIRST) {
+    if (idm_g == IDM_SENDTOFIRST) {
         AppendMenu(hmenu, MF_GRAYED | MF_DISABLED | MF_STRING,
-                   idm_t, TEXT("Send what sent to me to my sendto ^_^"));
+                   idm_g, TEXT("Send what sent to me to my sendto ^_^"));
     }
 }
 
@@ -263,10 +351,24 @@ void SendTo_SendToItem(HWND hwnd, int idm)
     HRESULT hres;
     int i;
 
+    //
+#if !defined(_MSC_VER)
+#ifdef _UNICODE
+#define __tgetmainargs __wgetmainargs
+#else
+#define __tgetmainargs __getmainargs
+#endif
+    typedef struct { int newmode; } _startupinfo;
+    int __cdecl __tgetmainargs(int *pargc, _TCHAR ***pargv, _TCHAR ***penv, int globb, _startupinfo*);
+    _TCHAR **env;
+    _startupinfo start_info = {0};
+    __tgetmainargs(&__argc, &__targv, &env, 1, &start_info); //tchar.h
+#endif
+
     FORKING = 1;
     //
-    if (__argc == 1) {
-        ShellExecute(NULL, NULL, PSENTTO[idm], NULL, NULL, SW_SHOWDEFAULT);
+    if (__argc < 2) {
+        ShellExecute(NULL, _T("open"), PSENTTO[idm], NULL, NULL, SW_SHOWDEFAULT);
     }
     else {
         hres = GetUIObjectOfPath(hwnd, PSENTTO[idm], &IID_IDropTarget, (LPVOID *)&pdt);
@@ -340,12 +442,15 @@ BOOL InitApp(void)
 
     RegisterClass(&wc);
 
+    m_Wow64EnableWow64FsRedirection = GetProcAddress(GetModuleHandle(_T("Kernel32")), "Wow64EnableWow64FsRedirection");
+    if (m_Wow64EnableWow64FsRedirection != NULL) {m_Wow64EnableWow64FsRedirection(FALSE);}
+
     hr = SHGetDesktopFolder(&g_psfDesktop);
     if (FAILED(hr)) {
         return FALSE;
     }
 
-    FOLDER_SENDTO = calloc(T_MAX_PATH, sizeof(TCHAR));
+    FOLDER_SENDTO = calloc(T_MAX_PATH + 1, sizeof(TCHAR));
     if (FOLDER_SENDTO == NULL) {return FALSE;}
 
     return TRUE;
@@ -359,7 +464,7 @@ void TermApp(void)
         g_psfDesktop->lpVtbl->Release(g_psfDesktop);
         g_psfDesktop = NULL;
     }
-    for (i = 0; i < idm_t; i++) {
+    for (i = 0; i < idm_g; i++) {
         LocalFree(PSENTTO[i]);
     }
     free(PSENTTO);
@@ -393,6 +498,7 @@ int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int
         hinst,                          /* Instance */
         0);                             /* No special parameters */
 
+    SetWindowLong(hwnd, GWL_EXSTYLE, WS_EX_TOOLWINDOW);
     ShowWindow(hwnd, nCmdShow);
 
     // run once!
