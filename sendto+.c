@@ -27,11 +27,13 @@ GetCurrentDirectory()
 
 TCHAR   *FOLDER_SENDTO;
 UINT    idm_t = IDM_SENDTOFIRST;
-TCHAR   **PSENTTO;                          /* store the shourtcuts full path */
+TCHAR   **PSENTTO;                      /* store the shourtcuts full path */
 
 HINSTANCE       g_hinst;                /* My hinstance */
 HMENU           g_hmenuSendTo;          /* Our SendTo popup */
 LPSHELLFOLDER   g_psfDesktop;           /* The desktop folder */
+
+UINT FORKING = 0;   /* compatible with UAC focus changes */
 
 LPSHELLFOLDER PIDL2PSF(LPITEMIDLIST pidl)
 {
@@ -95,7 +97,6 @@ LPSHELLFOLDER GetFolder(HWND hwnd, LPCTSTR pszPath)
  *      Given an absolute (desktop-relative) LPITEMIDLIST, get the
  *      specified UI object.
  *****************************************************************************/
-
 HRESULT GetUIObjectOfAbsPidl(HWND hwnd, LPITEMIDLIST pidl, REFIID riid, LPVOID *ppvOut)
 {
     /*
@@ -130,7 +131,6 @@ HRESULT GetUIObjectOfAbsPidl(HWND hwnd, LPITEMIDLIST pidl, REFIID riid, LPVOID *
  *  GetUIObjectOfPath
  *      Given an absolute path, get its specified UI object.
  *****************************************************************************/
-
 HRESULT GetUIObjectOfPath(HWND hwnd, LPCTSTR pszPath, REFIID riid, LPVOID *ppvOut)
 {
     LPITEMIDLIST pidl;
@@ -155,28 +155,18 @@ HRESULT GetUIObjectOfPath(HWND hwnd, LPCTSTR pszPath, REFIID riid, LPVOID *ppvOu
  *  DoDrop
  *      Drop a data object on a drop target.
  *****************************************************************************/
-
 void DoDrop(LPDATAOBJECT pdto, LPDROPTARGET pdt)
 {
     POINTL pt = { 0, 0 };
     DWORD dwEffect;
     HRESULT hres;
 
-    /*
-     *  The data object enters the drop target via the left button
-     *  with all drop effects permitted.
-     */
     dwEffect = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
     hres = pdt->lpVtbl->DragEnter(pdt, pdto, MK_LBUTTON, pt, &dwEffect);
     if (SUCCEEDED(hres) && dwEffect) {
-        /* The drop target likes the data object and the effect. Go drop it. */
         hres = pdt->lpVtbl->Drop(pdt, pdto, MK_LBUTTON, pt, &dwEffect);
 
     } else {
-        /*
-         *  The drop target didn't like us.  Tell it we're leaving,
-         *  sorry to bother you.
-         */
         hres = pdt->lpVtbl->DragLeave(pdt);
     }
 }
@@ -273,6 +263,8 @@ void SendTo_SendToItem(HWND hwnd, int idm)
     HRESULT hres;
     int i;
 
+    FORKING = 1;
+    //
     if (__argc == 1) {
         ShellExecute(NULL, NULL, PSENTTO[idm], NULL, NULL, SW_SHOWDEFAULT);
     }
@@ -291,7 +283,8 @@ void SendTo_SendToItem(HWND hwnd, int idm)
         }
         pdto->lpVtbl->Release(pdto);
     }
-    // Exit anyway!
+    // Exit as done!
+    FORKING = 0;
     PostQuitMessage(0);
 }
 
@@ -303,23 +296,13 @@ void SendTo_OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNotify)
 BOOL SendTo_OnCreate(HWND hwnd, LPCREATESTRUCT lpCreateStruct)
 {
     g_hmenuSendTo = CreatePopupMenu();
-
     return TRUE;
 }
 
-/* !!! */
-void SendTo_OnSetFocus(HWND hwnd, HWND hwndOldFocus)
-{
-    POINT pt;
-    //
-    if (GetCursorPos(&pt)) {
-        TrackPopupMenu(g_hmenuSendTo, TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, NULL);
-    }
-}
-
+/* UAC focus changes!!! */
 void SendTo_OnKillFocus(HWND hwnd, HWND hwndOldFocus)
 {
-    PostQuitMessage(0);
+    if (FORKING == 0) PostQuitMessage(0);
 }
 
 LRESULT CALLBACK SendTo_WndProc(HWND hwnd, UINT uiMsg, WPARAM wParam, LPARAM lParam)
@@ -328,13 +311,11 @@ LRESULT CALLBACK SendTo_WndProc(HWND hwnd, UINT uiMsg, WPARAM wParam, LPARAM lPa
 
     HANDLE_MSG(hwnd, WM_CREATE, SendTo_OnCreate);
 
-    HANDLE_MSG(hwnd, WM_SETFOCUS, SendTo_OnSetFocus);
-
-    HANDLE_MSG(hwnd, WM_KILLFOCUS, SendTo_OnKillFocus);
+    HANDLE_MSG(hwnd, WM_INITMENUPOPUP, SendTo_OnInitMenuPopup);
 
     HANDLE_MSG(hwnd, WM_COMMAND, SendTo_OnCommand);
 
-    HANDLE_MSG(hwnd, WM_INITMENUPOPUP, SendTo_OnInitMenuPopup);
+    HANDLE_MSG(hwnd, WM_KILLFOCUS, SendTo_OnKillFocus);
 
     }
 
@@ -391,6 +372,7 @@ int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int
     MSG msg;
     HWND hwnd;
     HRESULT hrInit;
+    POINT pt = {0, 0};
 
     g_hinst = hinst;
 
@@ -413,6 +395,10 @@ int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int
 
     ShowWindow(hwnd, nCmdShow);
 
+    // run once!
+    GetCursorPos(&pt);
+    TrackPopupMenu(g_hmenuSendTo, TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, NULL);
+    //
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
