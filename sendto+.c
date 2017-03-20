@@ -192,6 +192,13 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
     HRESULT hres;
     STRRET str;
 
+    /* OS_WOW6432 */
+    if ((PROC)(GetProcAddress(GetModuleHandle(_T("Shlwapi")), (LPCSTR)437))(30)) {
+        AppendMenu(hmenu, MF_GRAYED | MF_DISABLED | MF_STRING,
+                   idm_t, TEXT("64-bit OS needs 64-bit version :p"));
+       return;
+    }
+
     psf = GetFolder(hwnd, pszFolder);
     if (psf) {
         hres = psf->lpVtbl->EnumObjects(psf, hwnd,
