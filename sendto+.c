@@ -355,7 +355,7 @@ void TermApp(void)
     }
     n = idm_t - IDM_SENDTOFIRST;
     for (i = 0; i < n; i++) {
-        LocalFree(PSENDTO[i]);
+        free(PSENDTO[i]);
     }
     free(PSENDTO);
     //
