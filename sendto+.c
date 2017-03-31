@@ -5,6 +5,8 @@ https://msdn.microsoft.com/en-us/library/windows/desktop/bb776885.aspx
 GetCurrentDirectory()
 */
 
+#define STRICT
+
 #ifndef UNICODE
 #define T_MAX_PATH MAX_PATH
 #else
@@ -13,7 +15,6 @@ GetCurrentDirectory()
 
 #include <tchar.h>
 
-#define STRICT
 #include <windows.h>
 #ifndef RC_INVOKED
 #include <windowsx.h>
@@ -23,11 +24,71 @@ GetCurrentDirectory()
 #include <commdlg.h>
 #endif
 
+//
+#define WINGDIPAPI __stdcall
+#define GDIPCONST const
+
+typedef enum GpStatus {
+	Ok = 0,
+	GenericError = 1,
+	InvalidParameter = 2,
+	OutOfMemory = 3,
+	ObjectBusy = 4,
+	InsufficientBuffer = 5,
+	NotImplemented = 6,
+	Win32Error = 7,
+	WrongState = 8,
+	Aborted = 9,
+	FileNotFound = 10,
+	ValueOverflow = 11,
+	AccessDenied = 12,
+	UnknownImageFormat = 13,
+	FontFamilyNotFound = 14,
+	FontStyleNotFound = 15,
+	NotTrueTypeFont = 16,
+	UnsupportedGdiplusVersion = 17,
+	GdiplusNotInitialized = 18,
+	PropertyNotFound = 19,
+	PropertyNotSupported = 20,
+	ProfileNotFound = 21
+} GpStatus;
+
+typedef DWORD ARGB;
+typedef void GpBitmap;
+typedef void *DebugEventProc;
+typedef GpStatus (WINGDIPAPI *NotificationHookProc)(ULONG_PTR *token);
+typedef VOID (WINGDIPAPI *NotificationUnhookProc)(ULONG_PTR token);
+
+typedef struct GdiplusStartupInput {
+	UINT32 GdiplusVersion;
+	DebugEventProc DebugEventCallback;
+	BOOL SuppressBackgroundThread;
+	BOOL SuppressExternalCodecs;
+} GdiplusStartupInput;
+
+typedef struct GdiplusStartupOutput {
+	NotificationHookProc NotificationHook;
+	NotificationUnhookProc NotificationUnhook;
+} GdiplusStartupOutput;
+
+GpStatus WINGDIPAPI GdiplusStartup(ULONG_PTR*,GDIPCONST GdiplusStartupInput*,GdiplusStartupOutput*);
+VOID WINGDIPAPI GdiplusShutdown(ULONG_PTR);
+
+GpStatus WINGDIPAPI
+GdipCreateBitmapFromHICON(HICON hicon, GpBitmap** bitmap);
+
+GpStatus WINGDIPAPI
+GdipCreateHBITMAPFromBitmap(GpBitmap* bitmap, HBITMAP* hbmReturn, ARGB background);
+
+VOID WINGDIPAPI GdipFree(VOID*);
+
 #define IDM_SENDTOFIRST 0
 
 TCHAR   *FOLDER_SENDTO;
 UINT    idm_t = IDM_SENDTOFIRST;
 TCHAR   **PSENDTO;                      /* store the shourtcuts full path */
+//
+HBITMAP *hBmpImageA;                    /* MenuItemBitmap */
 
 HINSTANCE       g_hinst;                /* My hinstance */
 HMENU           g_hmenuSendTo;          /* Our SendTo popup */
@@ -169,6 +230,22 @@ LPTSTR pidl_to_name(LPSHELLFOLDER psf, LPITEMIDLIST pidl, SHGDNF uFlags) {
     return pszName;
 }
 
+BOOL GethBitMapByPath(LPTSTR pszPath, HBITMAP *phbmp) {
+    SHFILEINFO ShFI = {0};
+    BOOL hasBmpImage = FALSE;
+    //
+    if (SUCCEEDED( SHGetFileInfo(pszPath, FILE_ATTRIBUTE_NORMAL, &ShFI, sizeof(SHFILEINFO), SHGFI_ICON|SHGFI_SMALLICON|SHGFI_USEFILEATTRIBUTES) )) {
+        GpBitmap* bitmap = NULL;
+        if (GdipCreateBitmapFromHICON(ShFI.hIcon, &bitmap) == Ok) {
+            hasBmpImage = !(GdipCreateHBITMAPFromBitmap(bitmap, phbmp, 0));
+            GdipFree(bitmap);
+        }
+        DestroyIcon(ShFI.hIcon);
+    }
+    //
+    return hasBmpImage;
+}
+
 void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
 {
     LPSHELLFOLDER psf;
@@ -188,8 +265,10 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
                     SHCONTF_FOLDERS | SHCONTF_NONFOLDERS,
                     &peidl);
         if (SUCCEEDED(hres)) {
-            //MENUITEMINFO mii;
             LPITEMIDLIST pidl;
+            MENUITEMINFO mii;
+            MENUINFO mi;
+            BOOL hasBmpImage;
             while (peidl->lpVtbl->Next(peidl, 1, &pidl, NULL) == S_OK) {
                 LPTSTR pszPath, pszName;
                 //
@@ -206,21 +285,30 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
                 if (PSENDTO == NULL) {continue;}
                 PSENDTO[idm_t] = _tcsdup(pszPath);
                 //
+                hBmpImageA = (HBITMAP*)realloc(hBmpImageA, sizeof(HBITMAP*) * (idm_t + 1));
+                hasBmpImage = GethBitMapByPath(pszPath, &hBmpImageA[idm_t]);
+                //
                 if (PathIsDirectory(pszPath)) {
                     HMENU hSubMenu = CreatePopupMenu();
                     if (AppendMenu(hmenu, MF_ENABLED | MF_POPUP | MF_STRING, (UINT)hSubMenu, pszName)) {
+                        mi.cbSize = sizeof(mi);
+                        mi.fMask = MIM_HELPID;
+                        mi.dwContextHelpID = idm_t;
+                        SetMenuInfo(hSubMenu, &mi);
                         idm_t++;
-                        FolderToMenu(hwnd, hSubMenu, pszPath);
+                        //FolderToMenu(hwnd, hSubMenu, pszPath);
                     }
                 }
                 else {
                     if (AppendMenu(hmenu, MF_ENABLED | MF_STRING, idm_t, pszName)) {
-                        /*
                         mii.cbSize = sizeof(mii);
                         mii.fMask = MIIM_DATA;
-                        mii.dwItemData = (ULONG_PTR)pidl;
+                        //mii.dwItemData = (ULONG_PTR)pidl;
+                        if (hasBmpImage) {
+                            mii.fMask |= MIIM_BITMAP;
+                            mii.hbmpItem = hBmpImageA[idm_t];
+                        }
                         SetMenuItemInfo(hmenu, idm_t, FALSE, &mii);
-                        */
                         idm_t++;
                     }
                 }
@@ -238,15 +326,20 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
     }
 }
 
-void SendTo_BuildSendToMenu(HWND hwnd, HMENU hmenu)
-{
-    FolderToMenu(hwnd, hmenu, FOLDER_SENDTO);
-}
-
 void SendTo_OnInitMenuPopup(HWND hwnd, HMENU hmenu, UINT item, BOOL fSystemMenu)
 {
+    if (GetMenuItemCount(hmenu) > 0) {return;}
+    //
     if (hmenu == g_hmenuSendTo) { /* :p only top level */
-        SendTo_BuildSendToMenu(hwnd, hmenu);
+        FolderToMenu(hwnd, hmenu, FOLDER_SENDTO);
+    }
+    else {
+        MENUINFO mi;
+        mi.cbSize = sizeof(mi);
+        mi.fMask = MIM_HELPID;
+        if (GetMenuInfo(hmenu, &mi)) {
+            FolderToMenu(hwnd, hmenu, PSENDTO[mi.dwContextHelpID]);
+        }
     }
 }
 
@@ -356,10 +449,13 @@ void TermApp(void)
     n = idm_t - IDM_SENDTOFIRST;
     for (i = 0; i < n; i++) {
         free(PSENDTO[i]);
+        DeleteObject(&hBmpImageA[i]);
     }
     free(PSENDTO);
     //
     free(FOLDER_SENDTO);
+    //
+    free((void**)hBmpImageA);
 }
 
 int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int nCmdShow) 
@@ -368,13 +464,18 @@ int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int
     HWND hwnd;
     HRESULT hrInit;
     POINT pt = {0, 0};
+    //
+    ULONG_PTR           gdiplusToken;
+    GdiplusStartupInput gdiplusStartupInput = {1, NULL, FALSE, TRUE}; //MUST!
 
     g_hinst = hinst;
 
     if (!InitApp()) return 1;
 
     if (GetFullPathName(TEXT("sendto"), T_MAX_PATH, FOLDER_SENDTO, NULL) == 0) {return 2;}
-
+    //
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+    //
     hrInit = CoInitialize(NULL);
 
     hwnd = CreateWindow(
@@ -401,6 +502,8 @@ int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int
     }
 
     TermApp();
+    //
+    GdiplusShutdown(gdiplusToken);
 
     if (SUCCEEDED(hrInit)) {
         CoUninitialize();
