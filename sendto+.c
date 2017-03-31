@@ -1,8 +1,14 @@
 /* cl.exe /MD /Os /DUNICODE /D_UNICODE sendto+.c Ole32.lib shell32.lib user32.lib Comdlg32.lib Shlwapi.lib
+tcc sendto+.c -DUNICODE -D_UNICODE -DMINGW_HAS_SECURE_API -DINITGUID -lshell32 -lole32 -lshlwapi -lComdlg32 -lgdi32 -lgdiplus
+
 https://msdn.microsoft.com/en-us/library/cc144093.aspx
 https://msdn.microsoft.com/en-us/library/windows/desktop/bb776914.aspx
 https://msdn.microsoft.com/en-us/library/windows/desktop/bb776885.aspx
 GetCurrentDirectory()
+
+64-bit
+Wow64EnableWow64FsRedirection() only for system32;
+lnk file with parameters need 64-bit version!
 */
 
 #define STRICT
@@ -16,13 +22,16 @@ GetCurrentDirectory()
 #include <tchar.h>
 
 #include <windows.h>
-#ifndef RC_INVOKED
+
 #include <windowsx.h>
 #include <shlobj.h>
 #include <shlwapi.h>
-#include <strsafe.h>
 #include <commdlg.h>
-#endif
+
+// tcc, any other compiler support wWinMain() and '__argc/__targv'
+//shlguid.h
+DEFINE_GUID(IID_IDropTarget, 0x00000122, 0x0000, 0x0000, 0xc0,0x00, 0x00,0x00,0x00,0x00,0x00,0x46);
+DEFINE_GUID(IID_IDataObject, 0x0000010e, 0x0000, 0x0000, 0xc0,0x00, 0x00,0x00,0x00,0x00,0x00,0x46);
 
 //
 #define WINGDIPAPI __stdcall
@@ -85,7 +94,7 @@ VOID WINGDIPAPI GdipFree(VOID*);
 #define IDM_SENDTOFIRST 0
 
 TCHAR   *FOLDER_SENDTO;
-UINT    idm_t = IDM_SENDTOFIRST;
+UINT    idm_g = IDM_SENDTOFIRST;
 TCHAR   **PSENDTO;                      /* store the shourtcuts full path */
 //
 HBITMAP *hBmpImageA;                    /* MenuItemBitmap */
@@ -115,17 +124,15 @@ LPITEMIDLIST PidlFromPath(HWND hwnd, LPCTSTR pszPath)
     HRESULT hres;
     WCHAR *wszName;
     //
-    wszName = calloc(T_MAX_PATH, sizeof(WCHAR));
+    wszName = calloc(T_MAX_PATH + 1, sizeof(WCHAR));
 #ifdef UNICODE
-    if (FAILED(StringCchCopy(wszName, T_MAX_PATH, pszPath))) {
-        return NULL;
-    }
+    if (wcslen(pszPath) >= T_MAX_PATH) { return NULL; }
+    wcscpy(wszName, pszPath);
 #else
     if (!MultiByteToWideChar(CP_ACP, 0, pszPath, -1, wszName, T_MAX_PATH)) {
         return NULL;
     }
 #endif
-
     hres = g_psfDesktop->lpVtbl->ParseDisplayName(g_psfDesktop, hwnd, NULL, wszName, &ulEaten, &pidl, &dwAttributes);
     free(wszName);
     if (FAILED(hres)) {
@@ -156,14 +163,13 @@ HRESULT GetUIObjectOfAbsPidl(HWND hwnd, LPITEMIDLIST pidl, REFIID riid, LPVOID *
     HRESULT hres;
     /* Just for safety's sake. */
     *ppvOut = NULL;
-    hres = SHBindToParent(pidl, &IID_IShellFolder, (LPVOID *)&psf, &pidlLast);
+    hres = SHBindToParent(pidl, &IID_IShellFolder, (LPVOID *)&psf, (LPCITEMIDLIST*)&pidlLast);
     if (FAILED(hres)) {
         return hres;
     }
 
     /* Now ask the parent for the the UI object of the child. */
-    hres = psf->lpVtbl->GetUIObjectOf(psf, hwnd, 1, &pidlLast,
-                                riid, NULL, ppvOut);
+    hres = psf->lpVtbl->GetUIObjectOf(psf, hwnd, 1, (LPCITEMIDLIST*)&pidlLast, riid, NULL, ppvOut);
 
     /*
      *  Regardless of whether or not the GetUIObjectOf succeeded,
@@ -254,7 +260,7 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
 
     /* OS_WOW6432 */
     if ((PROC)(GetProcAddress(GetModuleHandle(_T("Shlwapi")), (LPCSTR)437))(30)) {
-        AppendMenu(hmenu, MF_GRAYED | MF_DISABLED | MF_STRING, idm_t, TEXT("64-bit OS needs 64-bit version :p"));
+        AppendMenu(hmenu, MF_GRAYED | MF_DISABLED | MF_STRING, idm_g, TEXT("64-bit OS needs 64-bit version :p"));
        return;
     }
 
@@ -281,35 +287,35 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
                 CoTaskMemFree(pidl);
                 //
                 // store path rather than retrial, as we check if it is dir.
-                PSENDTO = (TCHAR**)realloc(PSENDTO, sizeof(TCHAR*) * (idm_t + 1));
+                PSENDTO = (TCHAR**)realloc(PSENDTO, sizeof(TCHAR*) * (idm_g - IDM_SENDTOFIRST + 1));
                 if (PSENDTO == NULL) {continue;}
-                PSENDTO[idm_t] = _tcsdup(pszPath);
+                PSENDTO[idm_g] = _tcsdup(pszPath);
                 //
-                hBmpImageA = (HBITMAP*)realloc(hBmpImageA, sizeof(HBITMAP*) * (idm_t + 1));
-                hasBmpImage = GethBitMapByPath(pszPath, &hBmpImageA[idm_t]);
+                hBmpImageA = (HBITMAP*)realloc(hBmpImageA, sizeof(HBITMAP*) * (idm_g - IDM_SENDTOFIRST + 1));
+                hasBmpImage = GethBitMapByPath(pszPath, &hBmpImageA[idm_g]);
                 //
                 if (PathIsDirectory(pszPath)) {
                     HMENU hSubMenu = CreatePopupMenu();
                     if (AppendMenu(hmenu, MF_ENABLED | MF_POPUP | MF_STRING, (UINT)hSubMenu, pszName)) {
                         mi.cbSize = sizeof(mi);
                         mi.fMask = MIM_HELPID;
-                        mi.dwContextHelpID = idm_t;
+                        mi.dwContextHelpID = idm_g;
                         SetMenuInfo(hSubMenu, &mi);
-                        idm_t++;
+                        idm_g++;
                         //FolderToMenu(hwnd, hSubMenu, pszPath);
                     }
                 }
                 else {
-                    if (AppendMenu(hmenu, MF_ENABLED | MF_STRING, idm_t, pszName)) {
+                    if (AppendMenu(hmenu, MF_ENABLED | MF_STRING, idm_g, pszName)) {
                         mii.cbSize = sizeof(mii);
                         mii.fMask = MIIM_DATA;
                         //mii.dwItemData = (ULONG_PTR)pidl;
                         if (hasBmpImage) {
                             mii.fMask |= MIIM_BITMAP;
-                            mii.hbmpItem = hBmpImageA[idm_t];
+                            mii.hbmpItem = hBmpImageA[idm_g];
                         }
-                        SetMenuItemInfo(hmenu, idm_t, FALSE, &mii);
-                        idm_t++;
+                        SetMenuItemInfo(hmenu, idm_g, FALSE, &mii);
+                        idm_g++;
                     }
                 }
                 //
@@ -321,8 +327,8 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
         psf->lpVtbl->Release(psf);
     }
 
-    if (idm_t == IDM_SENDTOFIRST) {
-        AppendMenu(hmenu, MF_GRAYED | MF_DISABLED | MF_STRING, idm_t, TEXT("Send what sent to me to my sendto ^_^"));
+    if (idm_g == IDM_SENDTOFIRST) {
+        AppendMenu(hmenu, MF_GRAYED | MF_DISABLED | MF_STRING, idm_g, TEXT("Send what sent to me to my sendto ^_^"));
     }
 }
 
@@ -432,7 +438,7 @@ BOOL InitApp(void)
         return FALSE;
     }
 
-    FOLDER_SENDTO = calloc(T_MAX_PATH, sizeof(TCHAR));
+    FOLDER_SENDTO = calloc(T_MAX_PATH + 1, sizeof(TCHAR));
     if (FOLDER_SENDTO == NULL) {return FALSE;}
 
     return TRUE;
@@ -446,7 +452,7 @@ void TermApp(void)
         g_psfDesktop->lpVtbl->Release(g_psfDesktop);
         g_psfDesktop = NULL;
     }
-    n = idm_t - IDM_SENDTOFIRST;
+    n = idm_g - IDM_SENDTOFIRST;
     for (i = 0; i < n; i++) {
         free(PSENDTO[i]);
         DeleteObject(&hBmpImageA[i]);
