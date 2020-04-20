@@ -156,50 +156,62 @@ LPSHELLFOLDER GetFolder(HWND hwnd, LPCTSTR pszPath)
  *      Given an absolute (desktop-relative) LPITEMIDLIST, get the
  *      specified UI object.
  *****************************************************************************/
-HRESULT GetUIObjectOfAbsPidl(HWND hwnd, LPITEMIDLIST pidl, REFIID riid, LPVOID *ppvOut)
+HRESULT GetUIObjectOfAbsPidls(HWND hwnd, LPITEMIDLIST *pidls, INT NumOfpidls, REFIID riid, LPVOID *ppvOut)
 {
-    LPITEMIDLIST pidlLast;
+    LPITEMIDLIST *pidlLasts;
     LPSHELLFOLDER psf;
     HRESULT hres;
+    INT i;
+
     /* Just for safety's sake. */
     *ppvOut = NULL;
-    hres = SHBindToParent(pidl, &IID_IShellFolder, (LPVOID *)&psf, (LPCITEMIDLIST*)&pidlLast);
-    if (FAILED(hres)) {
-        return hres;
+
+    pidlLasts = malloc(sizeof(LPITEMIDLIST) * NumOfpidls);
+    if (pidlLasts == NULL) return E_FAIL;
+
+    for (i = 0; i < NumOfpidls; i++) {
+        hres = SHBindToParent(pidls[i], &IID_IShellFolder, (LPVOID *)&psf, (LPCITEMIDLIST*)&pidlLasts[i]);
+        if (FAILED(hres)) goto Fail;
+        if (i < NumOfpidls - 1) psf->lpVtbl->Release(psf);
     }
 
     /* Now ask the parent for the the UI object of the child. */
-    hres = psf->lpVtbl->GetUIObjectOf(psf, hwnd, 1, (LPCITEMIDLIST*)&pidlLast, riid, NULL, ppvOut);
+    hres = psf->lpVtbl->GetUIObjectOf(psf, hwnd, NumOfpidls, pidlLasts, riid, NULL, ppvOut);
 
     /*
      *  Regardless of whether or not the GetUIObjectOf succeeded,
      *  we have no further use for the parent folder.
      */
+Fail:
     psf->lpVtbl->Release(psf);
 
     return hres;
 }
 
-/*****************************************************************************
- *  GetUIObjectOfPath
- *      Given an absolute path, get its specified UI object.
- *****************************************************************************/
-HRESULT GetUIObjectOfPath(HWND hwnd, LPCTSTR pszPath, REFIID riid, LPVOID *ppvOut)
+HRESULT GetUIObjectOfPaths(HWND hwnd, LPCTSTR *pszPaths, INT NumOfPaths, REFIID riid, LPVOID *ppvOut)
 {
-    LPITEMIDLIST pidl;
+    LPITEMIDLIST *pidls;
     HRESULT hres;
+    INT i;
 
     /* Just for safety's sake. */
     *ppvOut = NULL;
 
-    pidl = PidlFromPath(hwnd, pszPath);
-    if (!pidl) {
-        return E_FAIL;
+    pidls = calloc(NumOfPaths, sizeof(LPITEMIDLIST));
+    if (pidls == NULL) return E_FAIL;
+
+    for (i = 0; i < NumOfPaths; i++) {
+        pidls[i] = PidlFromPath(hwnd, pszPaths[i]);
+        if (pidls[i] == NULL) goto Fail;
     }
 
-    hres = GetUIObjectOfAbsPidl(hwnd, pidl, riid, ppvOut);
+    hres = GetUIObjectOfAbsPidls(hwnd, pidls, NumOfPaths, riid, ppvOut);
 
-    CoTaskMemFree(pidl);
+Fail:
+    for (i = 0; i < NumOfPaths; i++) {
+        CoTaskMemFree(pidls[i]);
+    }
+    free(pidls);
 
     return hres;
 }
@@ -361,17 +373,14 @@ void SendTo_SendToItem(HWND hwnd, int idm)
     else {
         LPDATAOBJECT pdto;
         LPDROPTARGET pdt;
-        hres = GetUIObjectOfPath(hwnd, PSENDTO[idm], &IID_IDropTarget, (LPVOID *)&pdt);
+        hres = GetUIObjectOfPaths(hwnd, &PSENDTO[idm], 1, &IID_IDropTarget, (LPVOID *)&pdt);
         if (SUCCEEDED(hres)) {
-            int i;
-            for (i = 1; i < __argc; i++) {
-                /* First convert our filename to a data object. */
-                hres = GetUIObjectOfPath(hwnd, __targv[i], &IID_IDataObject, (LPVOID *)&pdto);
-                if (SUCCEEDED(hres)) {
-                        /* Now drop the file on the drop target. */
-                        DoDrop(pdto, pdt);
-                        pdt->lpVtbl->Release(pdt);
-                }
+            /* First convert all filenames to a data object. */
+            hres = GetUIObjectOfPaths(hwnd, __targv + 1, __argc - 1, &IID_IDataObject, (LPVOID *)&pdto);
+            if (SUCCEEDED(hres)) {
+                    /* Now drop the file on the drop target. */
+                    DoDrop(pdto, pdt);
+                    pdt->lpVtbl->Release(pdt);
             }
         }
         pdto->lpVtbl->Release(pdto);
