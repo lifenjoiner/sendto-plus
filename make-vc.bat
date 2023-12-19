@@ -11,6 +11,6 @@ for /f "usebackq delims=" %%i in (`"cl.exe 2>&1"`) do (
     )
 )
 
-cl.exe /MD /Os /DUNICODE /D_UNICODE /Fe%appname%_x%arch%.exe %appname%.c Ole32.lib shell32.lib user32.lib Comdlg32.lib Shlwapi.lib gdi32.lib gdiplus.lib bufferoverflowU.lib
+cl.exe /MD /Os /GA /DUNICODE /D_UNICODE /Fe%appname%_x%arch%.exe %appname%.c Ole32.lib shell32.lib user32.lib Comdlg32.lib Shlwapi.lib gdi32.lib Comctl32.lib bufferoverflowU.lib
 
 popd

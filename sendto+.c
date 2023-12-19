@@ -1,5 +1,5 @@
-/* cl.exe /MD /Os /DUNICODE /D_UNICODE sendto+.c Ole32.lib shell32.lib user32.lib Comdlg32.lib Shlwapi.lib
-tcc sendto+.c -DUNICODE -D_UNICODE -DMINGW_HAS_SECURE_API -DINITGUID -lshell32 -lole32 -lshlwapi -lComdlg32 -lgdi32 -lgdiplus
+/* cl.exe /MD /Os /GA /DUNICODE /D_UNICODE sendto+.c Ole32.lib shell32.lib user32.lib Comdlg32.lib Comctl32.lib Shlwapi.lib
+tcc sendto+.c -DUNICODE -D_UNICODE -DMINGW_HAS_SECURE_API -DINITGUID -lshell32 -lole32 -lshlwapi -lComdlg32 -lgdi32 -lcomctl32
 
 https://msdn.microsoft.com/en-us/library/cc144093.aspx
 https://msdn.microsoft.com/en-us/library/windows/desktop/bb776914.aspx
@@ -27,63 +27,12 @@ lnk file with parameters need 64-bit version!
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <commdlg.h>
+#include <commctrl.h>
 
 // tcc, any other compiler support wWinMain() and '__argc/__targv'
 // shlguid.h
 DEFINE_GUID(IID_IDropTarget, 0x00000122, 0x0000, 0x0000, 0xc0,0x00, 0x00,0x00,0x00,0x00,0x00,0x46);
 DEFINE_GUID(IID_IDataObject, 0x0000010e, 0x0000, 0x0000, 0xc0,0x00, 0x00,0x00,0x00,0x00,0x00,0x46);
-
-#define WINGDIPAPI __stdcall
-#define GDIPCONST const
-
-typedef enum GpStatus {
-    Ok = 0,
-    GenericError = 1,
-    InvalidParameter = 2,
-    OutOfMemory = 3,
-    ObjectBusy = 4,
-    InsufficientBuffer = 5,
-    NotImplemented = 6,
-    Win32Error = 7,
-    WrongState = 8,
-    Aborted = 9,
-    FileNotFound = 10,
-    ValueOverflow = 11,
-    AccessDenied = 12,
-    UnknownImageFormat = 13,
-    FontFamilyNotFound = 14,
-    FontStyleNotFound = 15,
-    NotTrueTypeFont = 16,
-    UnsupportedGdiplusVersion = 17,
-    GdiplusNotInitialized = 18,
-    PropertyNotFound = 19,
-    PropertyNotSupported = 20,
-    ProfileNotFound = 21
-} GpStatus;
-
-typedef DWORD ARGB;
-typedef void GpBitmap;
-typedef void *DebugEventProc;
-typedef GpStatus (WINGDIPAPI *NotificationHookProc)(ULONG_PTR *token);
-typedef VOID (WINGDIPAPI *NotificationUnhookProc)(ULONG_PTR token);
-
-typedef struct GdiplusStartupInput {
-    UINT32 GdiplusVersion;
-    DebugEventProc DebugEventCallback;
-    BOOL SuppressBackgroundThread;
-    BOOL SuppressExternalCodecs;
-} GdiplusStartupInput;
-
-typedef struct GdiplusStartupOutput {
-    NotificationHookProc NotificationHook;
-    NotificationUnhookProc NotificationUnhook;
-} GdiplusStartupOutput;
-
-GpStatus WINGDIPAPI GdiplusStartup(ULONG_PTR *, GDIPCONST GdiplusStartupInput *, GdiplusStartupOutput *);
-VOID WINGDIPAPI GdiplusShutdown(ULONG_PTR);
-GpStatus WINGDIPAPI GdipCreateBitmapFromHICON(HICON hicon, GpBitmap **bitmap);
-GpStatus WINGDIPAPI GdipCreateHBITMAPFromBitmap(GpBitmap *bitmap, HBITMAP *hbmReturn, ARGB background);
-VOID WINGDIPAPI GdipFree(VOID *);
 
 #define IDM_SENDTOFIRST 0
 
@@ -215,19 +164,38 @@ LPTSTR pidl_to_name(LPSHELLFOLDER psf, LPITEMIDLIST pidl, SHGDNF uFlags) {
     return pszName;
 }
 
-BOOL GethBitMapByPath(LPTSTR pszPath, HBITMAP *phbmp) {
-    SHFILEINFO ShFI = {0};
-    BOOL hasBmpImage = FALSE;
+// GdipCreateHBITMAPFromBitmap drops background's alpha.
+HBITMAP ImageList_CreateHBITMAPFromIcon(HIMAGELIST himl, int i, UINT flags)
+{
+    HBITMAP hBMP = NULL;
 
-    if (SUCCEEDED(SHGetFileInfo(pszPath, FILE_ATTRIBUTE_NORMAL, &ShFI, sizeof(SHFILEINFO), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES))) {
-        GpBitmap *bitmap = NULL;
-        if (GdipCreateBitmapFromHICON(ShFI.hIcon, &bitmap) == Ok) {
-            hasBmpImage = !(GdipCreateHBITMAPFromBitmap(bitmap, phbmp, 0));
-            GdipFree(bitmap);
+    HDC hCDC = CreateCompatibleDC(NULL);
+    if (hCDC != NULL) {
+        int width = 16, height = -16;
+        BITMAPINFO bmi = { {sizeof(BITMAPINFOHEADER), width, height, 1, 32, BI_RGB, 0, 0, 0, 0, 0}, {{0, 0, 0, 0}} };
+        if (ImageList_GetIconSize(himl, &width, &height)) {
+            bmi.bmiHeader.biWidth = width;
+            bmi.bmiHeader.biHeight = -height;
+            hBMP = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, NULL, NULL, 0);
+            SelectObject(hCDC, hBMP);
+            ImageList_Draw(himl, i, hCDC, 0, 0, ILD_TRANSPARENT);
         }
-        DestroyIcon(ShFI.hIcon);
+        DeleteDC(hCDC); // hBMP is not occupied any more.
     }
-    return hasBmpImage;
+    return hBMP;
+}
+
+HBITMAP GetHBitMapByPath(LPTSTR pszPath)
+{
+    SHFILEINFO ShFI = {0};
+    HBITMAP hBMP = NULL;
+
+    UINT uFlags = SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
+    HIMAGELIST imageList = (HIMAGELIST)SHGetFileInfo(pszPath, FILE_ATTRIBUTE_NORMAL, &ShFI, sizeof(SHFILEINFO), uFlags);
+    if (imageList != 0) {
+        hBMP = ImageList_CreateHBITMAPFromIcon(imageList, ShFI.iIcon, ILD_TRANSPARENT);
+    }
+    return hBMP;
 }
 
 void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
@@ -250,9 +218,9 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
             LPITEMIDLIST pidl;
             MENUITEMINFO mii;
             MENUINFO mi;
-            BOOL hasBmpImage;
             while (peidl->lpVtbl->Next(peidl, 1, &pidl, NULL) == S_OK) {
                 LPTSTR pszPath, pszName;
+                UINT uFlags = MF_ENABLED | MF_STRING;
                 //
                 pszPath = pidl_to_name(psf, pidl, SHGDN_FORPARSING);
                 pszName = pidl_to_name(psf, pidl, SHGDN_NORMAL);
@@ -267,12 +235,12 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
                 g_PSENDTO[g_idm] = _tcsdup(pszPath);
                 //
                 // Icon
-                g_hBmpImageA = (HBITMAP *)realloc(g_hBmpImageA, sizeof(HBITMAP *) * (g_idm - IDM_SENDTOFIRST + 1));
-                hasBmpImage = GethBitMapByPath(pszPath, &g_hBmpImageA[g_idm]);
+                g_hBmpImageA = (HBITMAP *)realloc(g_hBmpImageA, sizeof(HBITMAP) * (g_idm - IDM_SENDTOFIRST + 1));
+                g_hBmpImageA[g_idm] = GetHBitMapByPath(pszPath);
                 //
                 if (PathIsDirectory(pszPath)) {
                     HMENU hSubMenu = CreatePopupMenu();
-                    if (AppendMenu(hmenu, MF_ENABLED | MF_POPUP | MF_STRING, (UINT)hSubMenu, pszName)) {
+                    if (AppendMenu(hmenu, uFlags | MF_POPUP, (UINT_PTR)hSubMenu, pszName)) {
                         mi.cbSize = sizeof(mi);
                         mi.fMask = MIM_HELPID;
                         mi.dwContextHelpID = g_idm;
@@ -281,10 +249,10 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
                     }
                 }
                 else {
-                    if (AppendMenu(hmenu, MF_ENABLED | MF_STRING, g_idm, pszName)) {
+                    if (AppendMenu(hmenu, uFlags, g_idm, pszName)) {
                         mii.cbSize = sizeof(mii);
                         mii.fMask = MIIM_DATA;
-                        if (hasBmpImage) {
+                        if (g_hBmpImageA[g_idm] != NULL) {
                             mii.fMask |= MIIM_BITMAP;
                             mii.hbmpItem = g_hBmpImageA[g_idm];
                         }
@@ -432,14 +400,11 @@ int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int
     HWND hwnd;
     HRESULT hrInit;
     POINT pt = {0, 0};
-    ULONG_PTR           gdiplusToken;
-    GdiplusStartupInput gdiplusStartupInput = {1, NULL, FALSE, TRUE}; // MUST!
 
     g_hinst = hinst;
 
     if (!InitApp()) return 1;
     if (GetFullPathName(TEXT("sendto"), T_MAX_PATH, g_FOLDER_SENDTO, NULL) == 0) {return 2;}
-    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
     hrInit = CoInitialize(NULL);
 
     hwnd = CreateWindow(
@@ -465,7 +430,6 @@ int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int
     }
 
     TermApp();
-    GdiplusShutdown(gdiplusToken);
 
     if (SUCCEEDED(hrInit)) {
         CoUninitialize();
