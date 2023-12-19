@@ -8,7 +8,7 @@ GetCurrentDirectory()
 
 64-bit
 Wow64EnableWow64FsRedirection() only for system32;
-lnk file with parameters need 64-bit version!
+32-bit environment is shadowed in 64-bit version.
 */
 
 #define STRICT
@@ -29,10 +29,11 @@ lnk file with parameters need 64-bit version!
 #include <commdlg.h>
 #include <commctrl.h>
 
-// tcc, any other compiler support wWinMain() and '__argc/__targv'
-// shlguid.h
+// tcc or any other compiler support wWinMain() and '__argc/__targv'
+#if defined(__TINYC__)
 DEFINE_GUID(IID_IDropTarget, 0x00000122, 0x0000, 0x0000, 0xc0,0x00, 0x00,0x00,0x00,0x00,0x00,0x46);
 DEFINE_GUID(IID_IDataObject, 0x0000010e, 0x0000, 0x0000, 0xc0,0x00, 0x00,0x00,0x00,0x00,0x00,0x46);
+#endif
 
 #define IDM_SENDTOFIRST 0
 
@@ -48,7 +49,7 @@ LPSHELLFOLDER   g_psfDesktop;           /* The desktop folder */
 
 UINT g_FORKING = 0;   /* compatible with UAC focus changes */
 
-LPSHELLFOLDER PIDL2PSF(LPITEMIDLIST pidl)
+LPSHELLFOLDER PIDLTolpShellFolder(LPITEMIDLIST pidl)
 {
     LPSHELLFOLDER psf = NULL;
 
@@ -58,7 +59,7 @@ LPSHELLFOLDER PIDL2PSF(LPITEMIDLIST pidl)
     return psf;
 }
 
-LPITEMIDLIST PidlFromPath(HWND hwnd, LPCTSTR pszPath)
+LPITEMIDLIST PIDLFromPath(HWND hwnd, LPCTSTR pszPath)
 {
     LPITEMIDLIST pidl;
     ULONG ulEaten;
@@ -66,17 +67,18 @@ LPITEMIDLIST PidlFromPath(HWND hwnd, LPCTSTR pszPath)
     HRESULT hres;
     WCHAR *wszName;
 
-    wszName = calloc(T_MAX_PATH + 1, sizeof(WCHAR));
 #ifdef UNICODE
-    if (wcslen(pszPath) >= T_MAX_PATH) {return NULL;}
-    wcscpy(wszName, pszPath);
+    wszName = (WCHAR *)pszPath;
 #else
+    wszName = calloc(T_MAX_PATH, sizeof(WCHAR));
     if (!MultiByteToWideChar(CP_ACP, 0, pszPath, -1, wszName, T_MAX_PATH)) {
         return NULL;
     }
 #endif
     hres = g_psfDesktop->lpVtbl->ParseDisplayName(g_psfDesktop, hwnd, NULL, wszName, &ulEaten, &pidl, &dwAttributes);
+#ifndef UNICODE
     free(wszName);
+#endif
     if (FAILED(hres)) {
         return NULL;
     }
@@ -87,11 +89,11 @@ LPSHELLFOLDER GetFolder(HWND hwnd, LPCTSTR pszPath)
 {
     LPITEMIDLIST pidl;
 
-    pidl = PidlFromPath(hwnd, pszPath);
-    return PIDL2PSF(pidl);
+    pidl = PIDLFromPath(hwnd, pszPath);
+    return PIDLTolpShellFolder(pidl);
 }
 
-HRESULT GetUIObjectOfAbsPidls(HWND hwnd, LPITEMIDLIST *pidls, INT NumOfpidls, REFIID riid, LPVOID *ppvOut)
+HRESULT GetUIObjectOfAbsPIDLs(HWND hwnd, LPITEMIDLIST *pidls, INT NumOfpidls, REFIID riid, LPVOID *ppvOut)
 {
     LPITEMIDLIST *pidlLasts;
     LPSHELLFOLDER psf;
@@ -100,12 +102,18 @@ HRESULT GetUIObjectOfAbsPidls(HWND hwnd, LPITEMIDLIST *pidls, INT NumOfpidls, RE
 
     *ppvOut = NULL;
     pidlLasts = malloc(sizeof(LPITEMIDLIST) * NumOfpidls);
-    if (pidlLasts == NULL) return E_FAIL;
+    if (pidlLasts == NULL) {
+        return E_FAIL;
+    }
 
     for (i = 0; i < NumOfpidls; i++) {
         hres = SHBindToParent(pidls[i], &IID_IShellFolder, (LPVOID *)&psf, (LPCITEMIDLIST *)&pidlLasts[i]);
-        if (FAILED(hres)) goto Fail;
-        if (i < NumOfpidls - 1) psf->lpVtbl->Release(psf);
+        if (FAILED(hres)) {
+            goto Fail;
+        }
+        if (i < NumOfpidls - 1) {
+            psf->lpVtbl->Release(psf);
+        }
     }
     hres = psf->lpVtbl->GetUIObjectOf(psf, hwnd, NumOfpidls, pidlLasts, riid, NULL, ppvOut);
 Fail:
@@ -121,13 +129,17 @@ HRESULT GetUIObjectOfPaths(HWND hwnd, LPCTSTR *pszPaths, INT NumOfPaths, REFIID 
 
     *ppvOut = NULL;
     pidls = malloc(sizeof(LPITEMIDLIST) * NumOfPaths);
-    if (pidls == NULL) return E_FAIL;
+    if (pidls == NULL) {
+        return E_FAIL;
+    }
 
     for (i = 0; i < NumOfPaths; i++) {
-        pidls[i] = PidlFromPath(hwnd, pszPaths[i]);
-        if (pidls[i] == NULL) goto Fail;
+        pidls[i] = PIDLFromPath(hwnd, pszPaths[i]);
+        if (pidls[i] == NULL) {
+            goto Fail;
+        }
     }
-    hres = GetUIObjectOfAbsPidls(hwnd, pidls, NumOfPaths, riid, ppvOut);
+    hres = GetUIObjectOfAbsPIDLs(hwnd, pidls, NumOfPaths, riid, ppvOut);
 Fail:
     for (i = 0; i < NumOfPaths; i++) {
         CoTaskMemFree(pidls[i]);
@@ -138,7 +150,7 @@ Fail:
 
 void DoDrop(LPDATAOBJECT pdto, LPDROPTARGET pdt)
 {
-    POINTL pt = { 0, 0 };
+    POINTL pt = {0, 0};
     DWORD dwEffect;
     HRESULT hres;
 
@@ -152,7 +164,7 @@ void DoDrop(LPDATAOBJECT pdto, LPDROPTARGET pdt)
     }
 }
 
-LPTSTR pidl_to_name(LPSHELLFOLDER psf, LPITEMIDLIST pidl, SHGDNF uFlags) {
+LPTSTR PIDLToName(LPSHELLFOLDER psf, LPITEMIDLIST pidl, SHGDNF uFlags) {
     HRESULT hres;
     STRRET str;
     LPTSTR pszName = NULL;
@@ -207,7 +219,7 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
     /* OS_WOW6432 */
     if ((PROC)(GetProcAddress(GetModuleHandle(_T("Shlwapi")), (LPCSTR)437))(30)) {
         AppendMenu(hmenu, MF_GRAYED | MF_DISABLED | MF_STRING, g_idm, TEXT("64-bit OS needs 64-bit version :p"));
-       return;
+        return;
     }
 
     psf = GetFolder(hwnd, pszFolder);
@@ -222,16 +234,20 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
                 LPTSTR pszPath, pszName;
                 UINT uFlags = MF_ENABLED | MF_STRING;
                 //
-                pszPath = pidl_to_name(psf, pidl, SHGDN_FORPARSING);
-                pszName = pidl_to_name(psf, pidl, SHGDN_NORMAL);
+                pszPath = PIDLToName(psf, pidl, SHGDN_FORPARSING);
+                pszName = PIDLToName(psf, pidl, SHGDN_NORMAL);
                 //
                 // Path should be enough.
                 CoTaskMemFree(pidl);
-                if (pszPath == NULL || pszName == NULL) {continue;}
+                if (pszPath == NULL || pszName == NULL) {
+                    continue;
+                }
                 //
                 // Store the path to retrieve, as we check if it is a dir and launch it later.
                 g_PSENDTO = (TCHAR **)realloc(g_PSENDTO, sizeof(TCHAR *) * (g_idm - IDM_SENDTOFIRST + 1));
-                if (g_PSENDTO == NULL) {continue;}
+                if (g_PSENDTO == NULL) {
+                    continue;
+                }
                 g_PSENDTO[g_idm] = _tcsdup(pszPath);
                 //
                 // Icon
@@ -276,7 +292,9 @@ void FolderToMenu(HWND hwnd, HMENU hmenu, LPCTSTR pszFolder)
 
 void SendTo_OnInitMenuPopup(HWND hwnd, HMENU hmenu, UINT item, BOOL fSystemMenu)
 {
-    if (GetMenuItemCount(hmenu) > 0) {return;}
+    if (GetMenuItemCount(hmenu) > 0) {
+        return;
+    }
     if (hmenu == g_hmenuSendTo) { /* :p only top level */
         FolderToMenu(hwnd, hmenu, g_FOLDER_SENDTO);
     }
@@ -332,7 +350,9 @@ BOOL SendTo_OnCreate(HWND hwnd, LPCREATESTRUCT lpCreateStruct)
 /* UAC focus changes!!! */
 void SendTo_OnKillFocus(HWND hwnd, HWND hwndOldFocus)
 {
-    if (g_FORKING == 0) PostQuitMessage(0);
+    if (g_FORKING == 0) {
+        PostQuitMessage(0);
+    }
 }
 
 LRESULT CALLBACK SendTo_WndProc(HWND hwnd, UINT uiMsg, WPARAM wParam, LPARAM lParam)
@@ -371,7 +391,9 @@ BOOL InitApp(void)
     }
 
     g_FOLDER_SENDTO = calloc(T_MAX_PATH + 1, sizeof(TCHAR));
-    if (g_FOLDER_SENDTO == NULL) {return FALSE;}
+    if (g_FOLDER_SENDTO == NULL) {
+        return FALSE;
+    }
 
     return TRUE;
 }
@@ -387,11 +409,13 @@ void TermApp(void)
     n = g_idm - IDM_SENDTOFIRST;
     for (i = 0; i < n; i++) {
         free(g_PSENDTO[i]);
-        DeleteObject(&g_hBmpImageA[i]);
+        if (g_hBmpImageA[i] != NULL) {
+            DeleteObject(g_hBmpImageA[i]);
+        }
     }
     free(g_PSENDTO);
     free(g_FOLDER_SENDTO);
-    free((void **)g_hBmpImageA);
+    free(g_hBmpImageA);
 }
 
 int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int nCmdShow) 
@@ -403,8 +427,12 @@ int WINAPI _tWinMain(HINSTANCE hinst, HINSTANCE hinstPrev, LPTSTR lpCmdLine, int
 
     g_hinst = hinst;
 
-    if (!InitApp()) return 1;
-    if (GetFullPathName(TEXT("sendto"), T_MAX_PATH, g_FOLDER_SENDTO, NULL) == 0) {return 2;}
+    if (!InitApp()) {
+        return 1;
+    }
+    if (GetFullPathName(TEXT("sendto"), T_MAX_PATH, g_FOLDER_SENDTO, NULL) == 0) {
+        return 2;
+    }
     hrInit = CoInitialize(NULL);
 
     hwnd = CreateWindow(
